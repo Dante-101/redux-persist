@@ -1,6 +1,7 @@
 // @noflow
 import nodeResolve from 'rollup-plugin-node-resolve';
 import babel from 'rollup-plugin-babel';
+import commonjs from 'rollup-plugin-commonjs';
 import replace from 'rollup-plugin-replace';
 import uglify from 'rollup-plugin-uglify';
 
@@ -16,6 +17,7 @@ const config = {
     nodeResolve({
       jsnext: true
     }),
+    commonjs(),
     babel({
       exclude: 'node_modules/**',
       plugins: ['external-helpers']

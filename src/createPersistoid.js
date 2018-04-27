@@ -1,6 +1,6 @@
 // @flow
-
-import { KEY_PREFIX, REHYDRATE } from './constants'
+import { throttle } from 'lodash'
+import { KEY_PREFIX } from './constants'
 
 import type { Persistoid, PersistConfig, Transform } from './types'
 
@@ -11,7 +11,7 @@ export default function createPersistoid(config: PersistConfig): Persistoid {
   const blacklist: ?Array<string> = config.blacklist || null
   const whitelist: ?Array<string> = config.whitelist || null
   const transforms = config.transforms || []
-  const throttle = config.throttle || 0
+  const throttleTime = config.throttle || 0
   const storageKey = `${
     config.keyPrefix !== undefined ? config.keyPrefix : KEY_PREFIX
   }${config.key}`
@@ -22,8 +22,9 @@ export default function createPersistoid(config: PersistConfig): Persistoid {
   let lastState = {}
   let stagedState = {}
   let keysToProcess = []
-  let timeIterator: ?IntervalID = null
   let writePromise = null
+
+  const throttledProcess = throttle(processKeys, throttleTime)
 
   const update = (state: Object) => {
     // add any changed keys to the queue
@@ -34,50 +35,41 @@ export default function createPersistoid(config: PersistConfig): Persistoid {
       if (keysToProcess.indexOf(key) !== -1) return // is key already queued? noop
       keysToProcess.push(key) // add key to queue
     })
-
-    // start the time iterator if not running (read: throttle)
-    if (timeIterator === null) {
-      timeIterator = setInterval(processNextKey, throttle)
-    }
-
     lastState = state
+    throttledProcess()
   }
 
-  function processNextKey() {
-    if (keysToProcess.length === 0) {
-      if (timeIterator) clearInterval(timeIterator)
-      timeIterator = null
-      return
-    }
-
-    let key = keysToProcess.shift()
-    let endState = transforms.reduce((subState, transformer) => {
-      return transformer.in(subState, key, lastState)
-    }, lastState[key])
-    if (typeof endState !== 'undefined') stagedWrite(key, endState)
-  }
-
-  function stagedWrite(key: string, endState: any) {
-    try {
-      stagedState[key] = serialize(endState)
-    } catch (err) {
-      console.error(
-        'redux-persist/createPersistoid: error serializing state',
-        err
-      )
-    }
-    if (keysToProcess.length === 0) {
-      // cleanup any removed keys just before write.
-      Object.keys(stagedState).forEach(key => {
-        if (lastState[key] === undefined) {
-          delete stagedState[key]
+  function processKeys() {
+    while (keysToProcess.length > 0) {
+      let key = keysToProcess.shift()
+      let endState = transforms.reduce((subState, transformer) => {
+        return transformer.in(subState, key, lastState)
+      }, lastState[key])
+      if (typeof endState !== 'undefined') {
+        try {
+          stagedState[key] = serialize(endState)
+        } catch (err) {
+          console.error(
+            'redux-persist/createPersistoid: error serializing state',
+            err
+          )
         }
-      })
-
-      writePromise = storage
-        .setItem(storageKey, serialize(stagedState))
-        .catch(onWriteFail)
+      } else {
+        //if the end state is undefined, we should delete the old value
+        delete stagedState[key]
+      }
     }
+
+    // cleanup any removed keys just before write.
+    Object.keys(stagedState).forEach(key => {
+      if (lastState[key] === undefined) {
+        delete stagedState[key]
+      }
+    })
+
+    writePromise = storage
+      .setItem(storageKey, serialize(stagedState))
+      .catch(onWriteFail)
   }
 
   function passWhitelistBlacklist(key) {
@@ -89,15 +81,13 @@ export default function createPersistoid(config: PersistConfig): Persistoid {
 
   function onWriteFail(err) {
     // @TODO add fail handlers (typically storage full)
-    if (err && process.env.NODE_ENV !== 'production') {
+    if (err && throttledProcess.env.NODE_ENV !== 'production') {
       console.error('Error storing data', err)
     }
   }
 
   const flush = () => {
-    while (keysToProcess.length !== 0) {
-      processNextKey()
-    }
+    processKeys()
     return writePromise || Promise.resolve()
   }
 
